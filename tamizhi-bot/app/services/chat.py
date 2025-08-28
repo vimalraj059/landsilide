@@ -8,6 +8,8 @@ from app.services.math import solve_expression
 from app.services.knowledge import wikipedia_summary
 from app.services.culture import random_proverb, random_quote
 from app.services.translate import translate
+from app.models.db import SessionLocal
+from app.models.chat import ChatMessage
 
 
 @dataclass
@@ -62,6 +64,13 @@ class ChatOrchestrator:
             reply = "நான் உதவ தயாராக இருக்கிறேன்! Ask me anything."
 
         session.add(message, reply)
+        # Persist to DB
+        db = SessionLocal()
+        try:
+            db.add(ChatMessage(user_id=user_id, user_text=message, bot_text=reply))
+            db.commit()
+        finally:
+            db.close()
         return reply, lang
 
 

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from loguru import logger
 
 from app.api.routes import router
+from app.models.db import Base, engine
 
 
 def create_app() -> FastAPI:
@@ -23,6 +24,8 @@ app = create_app()
 @app.on_event("startup")
 async def on_startup() -> None:
     logger.info("Tamizhi BOT API starting up")
+    # Create DB tables
+    Base.metadata.create_all(bind=engine)
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
