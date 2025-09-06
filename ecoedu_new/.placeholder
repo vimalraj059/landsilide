@@ -1,0 +1,980 @@
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export interface ISubmission extends mongoose.Document {
+  assignmentId: mongoose.Types.ObjectId
+  userId: mongoose.Types.ObjectId
+  score: number
+  details: mongoose.Schema.Types.Mixed
+  completedAt: Date
+  createdAt: Date
+  updatedAt: Date
+}
+
+const SubmissionSchema = new Schema<ISubmission>({
+  assignmentId: { type: Schema.Types.ObjectId, ref: 'Assignment', required: true },
+  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  score: { type: Number, default: 0 },
+  details: { type: Schema.Types.Mixed },
+  completedAt: { type: Date, default: Date.now }
+}, { timestamps: true })
+
+export const Submission = models.Submission || model<ISubmission>('Submission', SubmissionSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export interface IAssignment extends mongoose.Document {
+  moduleId: mongoose.Types.ObjectId
+  groupId: mongoose.Types.ObjectId
+  dueAt?: Date
+  createdByUserId: mongoose.Types.ObjectId
+  createdAt: Date
+  updatedAt: Date
+}
+
+const AssignmentSchema = new Schema<IAssignment>({
+  moduleId: { type: Schema.Types.ObjectId, ref: 'Module', required: true },
+  groupId: { type: Schema.Types.ObjectId, ref: 'Group', required: true },
+  dueAt: { type: Date },
+  createdByUserId: { type: Schema.Types.ObjectId, ref: 'User', required: true }
+}, { timestamps: true })
+
+export const Assignment = models.Assignment || model<IAssignment>('Assignment', AssignmentSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export type ModuleType = 'quiz' | 'drag_drop' | 'simulation' | 'checklist'
+
+export interface IModule extends mongoose.Document {
+  title: string
+  topic: 'pollution' | 'water' | 'waste' | 'biodiversity' | 'energy'
+  type: ModuleType
+  content: mongoose.Schema.Types.Mixed
+  points: number
+  createdByUserId: mongoose.Types.ObjectId
+  createdAt: Date
+  updatedAt: Date
+}
+
+const ModuleSchema = new Schema<IModule>({
+  title: { type: String, required: true },
+  topic: { type: String, enum: ['pollution', 'water', 'waste', 'biodiversity', 'energy'], required: true },
+  type: { type: String, enum: ['quiz', 'drag_drop', 'simulation', 'checklist'], required: true },
+  content: { type: Schema.Types.Mixed, required: true },
+  points: { type: Number, default: 10 },
+  createdByUserId: { type: Schema.Types.ObjectId, ref: 'User', required: true }
+}, { timestamps: true })
+
+export const Module = models.Module || model<IModule>('Module', ModuleSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export interface IGroup extends mongoose.Document {
+  name: string
+  type: 'class' | 'school' | 'college' | 'club' | 'community'
+  ownerUserId: mongoose.Types.ObjectId
+  memberUserIds: mongoose.Types.ObjectId[]
+  createdAt: Date
+  updatedAt: Date
+}
+
+const GroupSchema = new Schema<IGroup>({
+  name: { type: String, required: true },
+  type: { type: String, enum: ['class', 'school', 'college', 'club', 'community'], required: true },
+  ownerUserId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  memberUserIds: [{ type: Schema.Types.ObjectId, ref: 'User' }]
+}, { timestamps: true })
+
+export const Group = models.Group || model<IGroup>('Group', GroupSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export type UserRole = 'student' | 'teacher' | 'citizen' | 'admin'
+
+export interface IUser extends mongoose.Document {
+  email: string
+  name: string
+  passwordHash?: string
+  role: UserRole
+  profileImageUrl?: string
+  schoolId?: string
+  createdAt: Date
+  updatedAt: Date
+}
+
+const UserSchema = new Schema<IUser>({
+  email: { type: String, required: true, unique: true, index: true },
+  name: { type: String, required: true },
+  passwordHash: { type: String },
+  role: { type: String, enum: ['student', 'teacher', 'citizen', 'admin'], required: true },
+  profileImageUrl: { type: String },
+  schoolId: { type: String }
+}, { timestamps: true })
+
+export const User = models.User || model<IUser>('User', UserSchema)
+
+import { Queue, Worker, QueueEvents, JobsOptions } from 'bullmq'
+import IORedis from 'ioredis'
+
+const connection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379')
+
+export const verificationQueue = new Queue('verification', { connection })
+export const verificationQueueEvents = new QueueEvents('verification', { connection })
+
+export function addVerificationTask(payload: { postId: string }, opts: JobsOptions = {}) {
+  return verificationQueue.add('verifyPost', payload, {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: true,
+    ...opts
+  })
+}
+
+export function startVerificationWorker() {
+  const worker = new Worker('verification', async job => {
+    if (job.name === 'verifyPost') {
+      await new Promise(r => setTimeout(r, 250))
+      return { status: 'approved' }
+    }
+  }, { connection })
+  return worker
+}
+
+import { UserStat } from '@/models/Gamification'
+import { connectToDatabase } from '@/lib/db'
+
+export async function awardPoints(userId: string, points: number) {
+  await connectToDatabase()
+  await UserStat.findOneAndUpdate(
+    { userId },
+    { $inc: { points } },
+    { upsert: true, new: true }
+  )
+}
+
+export async function incrementStreak(userId: string, now: Date = new Date()) {
+  await connectToDatabase()
+  const stat = await UserStat.findOne({ userId })
+  if (!stat) {
+    await UserStat.create({ userId, points: 0, streakCount: 1, lastActionAt: now })
+    return
+  }
+  const last = stat.lastActionAt
+  const diffDays = last ? Math.floor((now.getTime() - last.getTime()) / (1000 * 60 * 60 * 24)) : Infinity
+  const nextStreak = diffDays === 1 ? stat.streakCount + 1 : diffDays > 1 ? 1 : stat.streakCount
+  stat.streakCount = nextStreak
+  stat.lastActionAt = now
+  await stat.save()
+}
+
+import mongoose from 'mongoose'
+
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://root:example@localhost:27017/ecoedu?authSource=admin'
+
+declare global {
+  // eslint-disable-next-line no-var
+  var mongooseConn: { conn: typeof mongoose | null; promise: Promise<typeof mongoose> | null } | undefined
+}
+
+let cached = global.mongooseConn
+if (!cached) {
+  cached = global.mongooseConn = { conn: null, promise: null }
+}
+
+export async function connectToDatabase() {
+  if (cached!.conn) return cached!.conn
+  if (!cached!.promise) {
+    cached!.promise = mongoose.connect(MONGODB_URI, {
+      dbName: 'ecoedu'
+    })
+  }
+  cached!.conn = await cached!.promise
+  return cached!.conn
+}
+
+export { default } from 'next-auth/middleware'
+
+export const config = {
+  matcher: ['/dashboard/:path*']
+}
+
+import NextAuth from 'next-auth'
+
+declare module 'next-auth' {
+  interface Session {
+    user?: {
+      name?: string | null
+      email?: string | null
+      image?: string | null
+      role?: string | null
+    }
+  }
+}
+
+# Server
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET=replace-with-strong-secret
+
+# Database
+MONGODB_URI=mongodb://root:example@localhost:27017/ecoedu?authSource=admin
+
+# Queue
+REDIS_URL=redis://localhost:6379
+
+# Server
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET=replace-with-strong-secret
+
+# Database
+MONGODB_URI=mongodb://root:example@localhost:27017/ecoedu?authSource=admin
+
+# Queue
+REDIS_URL=redis://localhost:6379
+
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { addVerificationTask } from '@/lib/queue'
+
+const schema = z.object({ postId: z.string() })
+
+export async function POST(req: NextRequest) {
+  const body = await req.json()
+  const parsed = schema.safeParse(body)
+  if (!parsed.success) return NextResponse.json({ error: 'Invalid input' }, { status: 400 })
+  await addVerificationTask({ postId: parsed.data.postId })
+  return NextResponse.json({ enqueued: true })
+}
+
+import { Queue, Worker, QueueEvents, JobsOptions } from 'bullmq'
+import IORedis from 'ioredis'
+
+const connection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379')
+
+export const verificationQueue = new Queue('verification', { connection })
+export const verificationQueueEvents = new QueueEvents('verification', { connection })
+
+export function addVerificationTask(payload: { postId: string }, opts: JobsOptions = {}) {
+  return verificationQueue.add('verifyPost', payload, {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: true,
+    ...opts
+  })
+}
+
+export function startVerificationWorker() {
+  const worker = new Worker('verification', async job => {
+    if (job.name === 'verifyPost') {
+      // Mock verification: approve automatically after a short delay
+      await new Promise(r => setTimeout(r, 250))
+      return { status: 'approved' }
+    }
+  }, { connection })
+  return worker
+}
+
+import { UserStat } from '@/models/Gamification'
+import { connectToDatabase } from '@/lib/db'
+
+export async function awardPoints(userId: string, points: number) {
+  await connectToDatabase()
+  await UserStat.findOneAndUpdate(
+    { userId },
+    { $inc: { points } },
+    { upsert: true, new: true }
+  )
+}
+
+export async function incrementStreak(userId: string, now: Date = new Date()) {
+  await connectToDatabase()
+  const stat = await UserStat.findOne({ userId })
+  if (!stat) {
+    await UserStat.create({ userId, points: 0, streakCount: 1, lastActionAt: now })
+    return
+  }
+  const last = stat.lastActionAt
+  const diffDays = last ? Math.floor((now.getTime() - last.getTime()) / (1000 * 60 * 60 * 24)) : Infinity
+  const nextStreak = diffDays === 1 ? stat.streakCount + 1 : diffDays > 1 ? 1 : stat.streakCount
+  stat.streakCount = nextStreak
+  stat.lastActionAt = now
+  await stat.save()
+}
+
+"use client"
+import { useState } from 'react'
+
+export default function UploadPage() {
+  const [mediaUrl, setMediaUrl] = useState('')
+  const [caption, setCaption] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const submit = async () => {
+    setLoading(true)
+    setMessage(null)
+    try {
+      const res = await fetch('/api/posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: '000000000000000000000000', mediaUrl, caption })
+      })
+      if (!res.ok) throw new Error('Upload failed')
+      setMessage('Submitted for verification!')
+      setMediaUrl('')
+      setCaption('')
+    } catch (e: any) {
+      setMessage(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <main className="mx-auto max-w-2xl p-6 space-y-4">
+      <h1 className="text-2xl font-semibold">Upload Eco Action</h1>
+      <div className="space-y-2">
+        <input value={mediaUrl} onChange={e => setMediaUrl(e.target.value)} placeholder="Media URL" className="w-full rounded border p-2" />
+        <textarea value={caption} onChange={e => setCaption(e.target.value)} placeholder="Caption" className="w-full rounded border p-2" />
+        <button onClick={submit} disabled={loading} className="rounded bg-green-600 px-4 py-2 text-white hover:bg-green-700 disabled:opacity-60">
+          {loading ? 'Submitting...' : 'Submit'}
+        </button>
+        {message && <p className="text-sm text-gray-700">{message}</p>}
+      </div>
+    </main>
+  )
+}
+
+import Link from 'next/link'
+
+export default function FeedPage() {
+  return (
+    <main className="mx-auto max-w-5xl p-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Eco Feed</h1>
+        <Link href="/feed/upload" className="rounded bg-green-600 px-4 py-2 text-white hover:bg-green-700">Upload</Link>
+      </div>
+      <p className="text-gray-600">Share verified eco-actions with the community.</p>
+    </main>
+  )
+}
+
+export default function CitizenDashboard() {
+  return (
+    <main className="mx-auto max-w-5xl p-6 space-y-4">
+      <h1 className="text-2xl font-semibold">Citizen Dashboard</h1>
+      <ul className="space-y-2">
+        <li className="rounded border p-4">Log eco-actions</li>
+        <li className="rounded border p-4">Your streaks and badges</li>
+        <li className="rounded border p-4">Community leaderboard</li>
+      </ul>
+    </main>
+  )
+}
+
+export default function TeacherDashboard() {
+  return (
+    <main className="mx-auto max-w-5xl p-6 space-y-4">
+      <h1 className="text-2xl font-semibold">Teacher Dashboard</h1>
+      <ul className="space-y-2">
+        <li className="rounded border p-4">Create groups and assign modules</li>
+        <li className="rounded border p-4">Participation and completion reports</li>
+        <li className="rounded border p-4">Moderation queue</li>
+      </ul>
+    </main>
+  )
+}
+
+export default function StudentDashboard() {
+  return (
+    <main className="mx-auto max-w-5xl p-6 space-y-4">
+      <h1 className="text-2xl font-semibold">Student Dashboard</h1>
+      <ul className="space-y-2">
+        <li className="rounded border p-4">Assigned modules</li>
+        <li className="rounded border p-4">Your streak and badges</li>
+        <li className="rounded border p-4">Leaderboard position</li>
+      </ul>
+    </main>
+  )
+}
+
+import { getServerSession } from 'next-auth'
+import Link from 'next/link'
+
+export default async function DashboardPage() {
+  const session = await getServerSession()
+  const role = (session?.user as any)?.role || 'guest'
+  return (
+    <main className="mx-auto max-w-5xl p-6 space-y-4">
+      <h1 className="text-2xl font-semibold">Dashboard</h1>
+      <p className="text-gray-600">Signed in as {session?.user?.email ?? 'anonymous'} ({role})</p>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <Link href="/dashboard/student" className="rounded border p-4 hover:bg-gray-50">Student</Link>
+        <Link href="/dashboard/teacher" className="rounded border p-4 hover:bg-gray-50">Teacher</Link>
+        <Link href="/dashboard/citizen" className="rounded border p-4 hover:bg-gray-50">Citizen</Link>
+      </div>
+    </main>
+  )
+}
+
+import { NextResponse } from 'next/server'
+import { connectToDatabase } from '@/lib/db'
+import { UserStat } from '@/models/Gamification'
+
+export async function GET() {
+  await connectToDatabase()
+  const top = await UserStat.find().sort({ points: -1, streakCount: -1 }).limit(50)
+  return NextResponse.json(top)
+}
+
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { connectToDatabase } from '@/lib/db'
+import { Post } from '@/models/Post'
+
+const createPostSchema = z.object({
+  userId: z.string(),
+  mediaUrl: z.string().url(),
+  caption: z.string().optional()
+})
+
+export async function GET() {
+  await connectToDatabase()
+  const posts = await Post.find().sort({ createdAt: -1 }).limit(100)
+  return NextResponse.json(posts)
+}
+
+export async function POST(req: NextRequest) {
+  const body = await req.json()
+  const parsed = createPostSchema.safeParse(body)
+  if (!parsed.success) return NextResponse.json({ error: 'Invalid input' }, { status: 400 })
+  await connectToDatabase()
+  const post = await Post.create({ ...parsed.data, verificationStatus: 'pending' })
+  return NextResponse.json(post, { status: 201 })
+}
+
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { connectToDatabase } from '@/lib/db'
+import { Module } from '@/models/Module'
+
+const createModuleSchema = z.object({
+  title: z.string().min(1),
+  topic: z.enum(['pollution', 'water', 'waste', 'biodiversity', 'energy']),
+  type: z.enum(['quiz', 'drag_drop', 'simulation', 'checklist']),
+  content: z.record(z.any()),
+  points: z.number().min(0),
+  createdByUserId: z.string()
+})
+
+export async function GET() {
+  await connectToDatabase()
+  const modules = await Module.find().limit(200)
+  return NextResponse.json(modules)
+}
+
+export async function POST(req: NextRequest) {
+  const body = await req.json()
+  const parsed = createModuleSchema.safeParse(body)
+  if (!parsed.success) return NextResponse.json({ error: 'Invalid input' }, { status: 400 })
+  await connectToDatabase()
+  const mod = await Module.create(parsed.data)
+  return NextResponse.json(mod, { status: 201 })
+}
+
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { connectToDatabase } from '@/lib/db'
+import { Group } from '@/models/Group'
+
+const createGroupSchema = z.object({
+  name: z.string().min(1),
+  type: z.enum(['class', 'school', 'college', 'club', 'community']),
+  ownerUserId: z.string()
+})
+
+export async function GET() {
+  await connectToDatabase()
+  const groups = await Group.find().limit(200)
+  return NextResponse.json(groups)
+}
+
+export async function POST(req: NextRequest) {
+  const body = await req.json()
+  const parsed = createGroupSchema.safeParse(body)
+  if (!parsed.success) return NextResponse.json({ error: 'Invalid input' }, { status: 400 })
+  await connectToDatabase()
+  const group = await Group.create(parsed.data)
+  return NextResponse.json(group, { status: 201 })
+}
+
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import bcrypt from 'bcryptjs'
+import { connectToDatabase } from '@/lib/db'
+import { User } from '@/models/User'
+
+const createUserSchema = z.object({
+  email: z.string().email(),
+  name: z.string().min(1),
+  password: z.string().min(6),
+  role: z.enum(['student', 'teacher', 'citizen', 'admin'])
+})
+
+export async function GET() {
+  await connectToDatabase()
+  const users = await User.find().select('email name role createdAt')
+  return NextResponse.json(users)
+}
+
+export async function POST(req: NextRequest) {
+  const json = await req.json()
+  const parsed = createUserSchema.safeParse(json)
+  if (!parsed.success) return NextResponse.json({ error: 'Invalid input' }, { status: 400 })
+  await connectToDatabase()
+  const existing = await User.findOne({ email: parsed.data.email })
+  if (existing) return NextResponse.json({ error: 'Email already in use' }, { status: 409 })
+  const passwordHash = await bcrypt.hash(parsed.data.password, 10)
+  const user = await User.create({
+    email: parsed.data.email,
+    name: parsed.data.name,
+    passwordHash,
+    role: parsed.data.role
+  })
+  return NextResponse.json({ id: user._id, email: user.email, name: user.name, role: user.role }, { status: 201 })
+}
+
+export { default } from 'next-auth/middleware'
+
+export const config = {
+  matcher: ['/dashboard/:path*']
+}
+
+import NextAuth from 'next-auth'
+
+declare module 'next-auth' {
+  interface Session {
+    user?: {
+      name?: string | null
+      email?: string | null
+      image?: string | null
+      role?: string | null
+    }
+  }
+}
+
+import NextAuth, { NextAuthOptions } from 'next-auth'
+import Credentials from 'next-auth/providers/credentials'
+import { z } from 'zod'
+import bcrypt from 'bcryptjs'
+import { connectToDatabase } from '@/lib/db'
+import { User } from '@/models/User'
+
+const credentialsSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6)
+})
+
+export const authOptions: NextAuthOptions = {
+  session: { strategy: 'jwt' },
+  providers: [
+    Credentials({
+      name: 'Email and Password',
+      credentials: {
+        email: { label: 'Email', type: 'text' },
+        password: { label: 'Password', type: 'password' }
+      },
+      authorize: async (credentials) => {
+        const parsed = credentialsSchema.safeParse(credentials)
+        if (!parsed.success) return null
+        const { email, password } = parsed.data
+        await connectToDatabase()
+        const user = await User.findOne({ email })
+        if (!user || !user.passwordHash) return null
+        const ok = await bcrypt.compare(password, user.passwordHash)
+        if (!ok) return null
+        return { id: String(user._id), name: user.name, email: user.email, role: user.role }
+      }
+    })
+  ],
+  callbacks: {
+    async jwt({ token, user }) {
+      if (user) {
+        // @ts-expect-error add role
+        token.role = (user as any).role
+      }
+      return token
+    },
+    async session({ session, token }) {
+      if (session.user) {
+        // @ts-expect-error add role
+        session.user.role = token.role as string | undefined
+      }
+      return session
+    }
+  }
+}
+
+const handler = NextAuth(authOptions)
+export { handler as GET, handler as POST }
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export interface IBadge extends mongoose.Document {
+  key: string
+  name: string
+  description?: string
+  icon?: string
+}
+
+const BadgeSchema = new Schema<IBadge>({
+  key: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  description: { type: String },
+  icon: { type: String }
+})
+
+export const Badge = models.Badge || model<IBadge>('Badge', BadgeSchema)
+
+export interface IUserStat extends mongoose.Document {
+  userId: mongoose.Types.ObjectId
+  points: number
+  streakCount: number
+  lastActionAt?: Date
+  badges: string[]
+}
+
+const UserStatSchema = new Schema<IUserStat>({
+  userId: { type: Schema.Types.ObjectId, ref: 'User', unique: true, required: true },
+  points: { type: Number, default: 0 },
+  streakCount: { type: Number, default: 0 },
+  lastActionAt: { type: Date },
+  badges: [{ type: String }]
+})
+
+export const UserStat = models.UserStat || model<IUserStat>('UserStat', UserStatSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export type VerificationStatus = 'pending' | 'approved' | 'rejected'
+
+export interface IPost extends mongoose.Document {
+  userId: mongoose.Types.ObjectId
+  mediaUrl: string
+  caption?: string
+  likesCount: number
+  commentsCount: number
+  verificationStatus: VerificationStatus
+  createdAt: Date
+  updatedAt: Date
+}
+
+const PostSchema = new Schema<IPost>({
+  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  mediaUrl: { type: String, required: true },
+  caption: { type: String },
+  likesCount: { type: Number, default: 0 },
+  commentsCount: { type: Number, default: 0 },
+  verificationStatus: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' }
+}, { timestamps: true })
+
+export const Post = models.Post || model<IPost>('Post', PostSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export interface ISubmission extends mongoose.Document {
+  assignmentId: mongoose.Types.ObjectId
+  userId: mongoose.Types.ObjectId
+  score: number
+  details: mongoose.Schema.Types.Mixed
+  completedAt: Date
+  createdAt: Date
+  updatedAt: Date
+}
+
+const SubmissionSchema = new Schema<ISubmission>({
+  assignmentId: { type: Schema.Types.ObjectId, ref: 'Assignment', required: true },
+  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  score: { type: Number, default: 0 },
+  details: { type: Schema.Types.Mixed },
+  completedAt: { type: Date, default: Date.now }
+}, { timestamps: true })
+
+export const Submission = models.Submission || model<ISubmission>('Submission', SubmissionSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export interface IAssignment extends mongoose.Document {
+  moduleId: mongoose.Types.ObjectId
+  groupId: mongoose.Types.ObjectId
+  dueAt?: Date
+  createdByUserId: mongoose.Types.ObjectId
+  createdAt: Date
+  updatedAt: Date
+}
+
+const AssignmentSchema = new Schema<IAssignment>({
+  moduleId: { type: Schema.Types.ObjectId, ref: 'Module', required: true },
+  groupId: { type: Schema.Types.ObjectId, ref: 'Group', required: true },
+  dueAt: { type: Date },
+  createdByUserId: { type: Schema.Types.ObjectId, ref: 'User', required: true }
+}, { timestamps: true })
+
+export const Assignment = models.Assignment || model<IAssignment>('Assignment', AssignmentSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export type ModuleType = 'quiz' | 'drag_drop' | 'simulation' | 'checklist'
+
+export interface IModule extends mongoose.Document {
+  title: string
+  topic: 'pollution' | 'water' | 'waste' | 'biodiversity' | 'energy'
+  type: ModuleType
+  content: mongoose.Schema.Types.Mixed
+  points: number
+  createdByUserId: mongoose.Types.ObjectId
+  createdAt: Date
+  updatedAt: Date
+}
+
+const ModuleSchema = new Schema<IModule>({
+  title: { type: String, required: true },
+  topic: { type: String, enum: ['pollution', 'water', 'waste', 'biodiversity', 'energy'], required: true },
+  type: { type: String, enum: ['quiz', 'drag_drop', 'simulation', 'checklist'], required: true },
+  content: { type: Schema.Types.Mixed, required: true },
+  points: { type: Number, default: 10 },
+  createdByUserId: { type: Schema.Types.ObjectId, ref: 'User', required: true }
+}, { timestamps: true })
+
+export const Module = models.Module || model<IModule>('Module', ModuleSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export interface IGroup extends mongoose.Document {
+  name: string
+  type: 'class' | 'school' | 'college' | 'club' | 'community'
+  ownerUserId: mongoose.Types.ObjectId
+  memberUserIds: mongoose.Types.ObjectId[]
+  createdAt: Date
+  updatedAt: Date
+}
+
+const GroupSchema = new Schema<IGroup>({
+  name: { type: String, required: true },
+  type: { type: String, enum: ['class', 'school', 'college', 'club', 'community'], required: true },
+  ownerUserId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  memberUserIds: [{ type: Schema.Types.ObjectId, ref: 'User' }]
+}, { timestamps: true })
+
+export const Group = models.Group || model<IGroup>('Group', GroupSchema)
+
+import mongoose, { Schema, model, models } from 'mongoose'
+
+export type UserRole = 'student' | 'teacher' | 'citizen' | 'admin'
+
+export interface IUser extends mongoose.Document {
+  email: string
+  name: string
+  passwordHash?: string
+  role: UserRole
+  profileImageUrl?: string
+  schoolId?: string
+  createdAt: Date
+  updatedAt: Date
+}
+
+const UserSchema = new Schema<IUser>({
+  email: { type: String, required: true, unique: true, index: true },
+  name: { type: String, required: true },
+  passwordHash: { type: String },
+  role: { type: String, enum: ['student', 'teacher', 'citizen', 'admin'], required: true },
+  profileImageUrl: { type: String },
+  schoolId: { type: String }
+}, { timestamps: true })
+
+export const User = models.User || model<IUser>('User', UserSchema)
+
+import mongoose from 'mongoose'
+
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://root:example@localhost:27017/ecoedu?authSource=admin'
+
+declare global {
+  // eslint-disable-next-line no-var
+  var mongooseConn: { conn: typeof mongoose | null; promise: Promise<typeof mongoose> | null } | undefined
+}
+
+let cached = global.mongooseConn
+if (!cached) {
+  cached = global.mongooseConn = { conn: null, promise: null }
+}
+
+export async function connectToDatabase() {
+  if (cached!.conn) return cached!.conn
+  if (!cached!.promise) {
+    cached!.promise = mongoose.connect(MONGODB_URI, {
+      dbName: 'ecoedu'
+    })
+  }
+  cached!.conn = await cached!.promise
+  return cached!.conn
+}
+
+version: '3.9'
+services:
+  mongo:
+    image: mongo:7
+    container_name: ecoedu-mongo
+    restart: unless-stopped
+    ports:
+      - '27017:27017'
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+    volumes:
+      - mongo_data:/data/db
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecoedu-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+
+volumes:
+  mongo_data:
+  redis_data:
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 255 255 255;
+  --foreground: 17 24 39;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  background-color: rgb(var(--background));
+  color: rgb(var(--foreground));
+}
+
+module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {}
+  }
+}
+
+import type { Config } from 'tailwindcss'
+
+export default {
+  content: ['./src/**/*.{ts,tsx}'],
+  theme: {
+    extend: {}
+  },
+  plugins: []
+} satisfies Config
+
+export default function HomePage() {
+  return (
+    <main className="mx-auto max-w-4xl p-6">
+      <h1 className="text-3xl font-semibold">EcoEdu</h1>
+      <p className="mt-2 text-gray-600">Gamified environmental learning for students, teachers, and citizens.</p>
+    </main>
+  )
+}
+
+import './globals.css'
+import type { Metadata } from 'next'
+
+export const metadata: Metadata = {
+  title: 'EcoEdu',
+  description: 'Gamified Environmental Education Platform'
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body className="min-h-screen bg-gray-50 text-gray-900">
+        {children}
+      </body>
+    </html>
+  )
+}
+
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "es2022"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+  experimental: {
+    typedRoutes: true
+  },
+  images: {
+    remotePatterns: [
+      { protocol: 'https', hostname: '**' }
+    ]
+  }
+}
+
+module.exports = nextConfig
+
+{
+  "name": "ecoedu",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "mongoose": "^8.6.0",
+    "zod": "^3.23.8",
+    "next-auth": "^4.24.7",
+    "bcryptjs": "^2.4.3",
+    "clsx": "^2.1.0",
+    "dayjs": "^1.11.11"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5",
+    "@types/node": "20.11.17",
+    "@types/react": "18.2.67",
+    "@types/react-dom": "18.2.22",
+    "tailwindcss": "3.4.1",
+    "postcss": "8.4.35",
+    "autoprefixer": "10.4.18",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.5"
+  }
+}
+
